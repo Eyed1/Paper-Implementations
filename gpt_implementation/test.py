@@ -16,8 +16,8 @@ if __name__ == "__main__":
 
     model.to(device)
 
-    #for name, param in model.named_parameters():
-        #print(name, param.get_device())
+    for name, param in model.named_parameters():
+        print(name, param.get_device(), param.requires_grad)
 
     test_arr = t.randint(0, 31, (64, 256)).to(device)
     """

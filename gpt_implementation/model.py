@@ -21,14 +21,17 @@ class AttentionHead(nn.Module):
         nn.init.normal_(self.W_K, 0, 0.02)
         nn.init.normal_(self.W_V, 0, 0.02)
 
-    def forward(self, x: ["batch", "seq_len", "d_model"]):
-        Q = einops.einsum(self.W_Q, x, "d_k d_model, b seq_len d_model -> b seq_len d_k")
-        K = einops.einsum(self.W_K, x, "d_k d_model, b seq_len d_model -> b seq_len d_k")
-        V = einops.einsum(self.W_V, x, "d_v d_model, b seq_len d_model -> b seq_len d_v")
-        z = einops.einsum(Q, K, "b seq1 d_m1, b seq2 d_m2 -> b seq1 seq2")
+    def forward(self, 
+                q: ["batch", "seq_len", "d_model"], 
+                k: ["batch", "seq_len", "d_model"],
+                v: ["batch", "seq_len", "d_model"]):
+        Q = einops.einsum(self.W_Q, q, "d_k d_model, b seq_len d_model -> b seq_len d_k")
+        K = einops.einsum(self.W_K, k, "d_k d_model, b seq_len d_model -> b seq_len d_k")
+        V = einops.einsum(self.W_V, v, "d_v d_model, b seq_len d_model -> b seq_len d_v")
+        z = einops.einsum(Q, K, "b seq1 d_k, b seq2 d_k -> b seq1 seq2")
 
         if self.mask:
-            mask = t.triu(t.ones(z.shape[1], z.shape[2]), diagonal = 1).bool().to(x.get_device())
+            mask = t.triu(t.ones(z.shape[1], z.shape[2]), diagonal = 1).bool().to(z.device)
             z = z.masked_fill(mask, -t.inf)
 
         z = nn.functional.softmax(z/(self.d_k**0.5), dim = -1)
@@ -49,11 +52,14 @@ class MultiHeadAttention(nn.Module):
         self.W_O = nn.Parameter(t.zeros((n_heads * d_v, d_model)))
         nn.init.normal_(self.W_O, 0, 0.02)
 
-    def forward(self, x : ["batch", "seq_len", "d_model"]):
+    def forward(self, 
+                q : ["batch", "seq_len", "d_model"],
+                k : ["batch", "seq_len", "d_model"],
+                v : ["batch", "seq_len", "d_model"],):
         #norm_x = self.layer_norm1(x)
         head_outs = []
         for i in range(self.n_heads):
-            head_outs.append(self.attention_heads[i](x))
+            head_outs.append(self.attention_heads[i](q,k,v))
         concat_head_outs = t.concat(head_outs, dim = -1)
         multi_head_outs = einops.einsum(self.W_O, concat_head_outs, "headsxd_v d_model, b seq_len headsxd_v -> b seq_len d_model")
         return multi_head_outs
@@ -79,16 +85,16 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x : ["batch", "seq_len", "d_model"]):
         norm_x = self.layer_norm1(x)
-        multi_out = norm_x + self.multihead(norm_x)
+        multi_out = x + self.multihead(norm_x, norm_x, norm_x)
         norm1_x = self.layer_norm2(multi_out)
-        out_x = norm1_x + self.feedforward(norm1_x)
+        out_x = multi_out + self.feedforward(norm1_x)
         return out_x 
 
 def positional_encoding(d_model: int, seq_len: int, device):
     base_vals = einops.repeat(t.arange(0, seq_len).to(device), "a -> b a", b = d_model)
     exps = einops.repeat(t.arange(0, d_model).to(device), "a -> a b", b = seq_len)
-    pos_encoding_sin = t.sin(t.pow(base_vals/10000, exps/d_model))
-    pos_encoding_cos = t.cos(t.pow(base_vals/10000, (exps - 1)/d_model))
+    pos_encoding_sin = t.sin(base_vals/t.pow(10000, exps/d_model))
+    pos_encoding_cos = t.cos(base_vals/t.pow(10000, (exps - 1)/d_model))
 
     pos_encoding = t.zeros(d_model, seq_len).to(device)
     pos_encoding[::2, :] = pos_encoding_sin[::2, :]
@@ -125,19 +131,20 @@ class Decoder(nn.Module):
         )
         self.final_layer_norm = nn.LayerNorm([self.d_model])
         self.final_linear = nn.Parameter(t.zeros(self.d_model, self.alphabet_size))
+        nn.init.normal_(self.final_linear, 0, 0.02)
 
         for layer in self.modules():
             if isinstance(layer, nn.Linear):
                 nn.init.normal_(layer.weight, 0, 0.02)
 
     def forward(self, x : ["batch", "seq_len"]):
-        pos_encode = positional_encoding(self.d_model, x.shape[1], x.get_device())
+        pos_encode = positional_encoding(self.d_model, x.shape[1], x.device)
         embed = self.embed_linear(x) + pos_encode
         for i in range(self.n_layers):
             embed = self.attention_blocks[i](embed)
         embed = self.final_layer_norm(embed)
         embed = einops.einsum(embed, self.final_linear, "batch seq_len d_model, d_model alphabet_size -> batch seq_len alphabet_size")
-        embed = t.softmax(embed, dim = -1)
+        #embed = t.softmax(embed, dim = -1)
         return embed
  
 
